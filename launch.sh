@@ -115,7 +115,7 @@ cat > "$SCRIPT" << 'HEADER'
 HEADER
 
 cat >> "$SCRIPT" << SBATCH_DIRECTIVES
-#SBATCH --account=infra01
+#SBATCH --account=lsaie-ss26
 #SBATCH --time=${TIME}
 #SBATCH --job-name=${JOB_NAME}
 #SBATCH --output=logs/%x-%j.log
@@ -133,8 +133,8 @@ cat >> "$SCRIPT" << 'BODY'
 echo "START TIME: $(date)"
 
 ################ Configs ################
-WORKDIR=/users/schlag/gipfelsturm
-MEGATRON_LM_DIR=$WORKDIR/Megatron-LM
+WORKDIR=/users/$USER/lsaie-ss26-gipfelsturm
+MEGATRON_LM_DIR=$WORKDIR/Megatron-LM-repo
 DATA_PREFIX=/capstor/store/cscs/swissai/infra01/datasets/nvidia/Nemotron-ClimbMix/climbmix_small_megatron/climbmix_small
 DATASET_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/cache
 BODY
@@ -311,7 +311,7 @@ WANDB_INSERT
 cat >> "$SCRIPT" << 'FOOTER'
 
 echo "CMD: $TRAINING_CMD"
-srun -lu --mpi=pmix --network=disable_rdzv_get --environment=alps3 --cpus-per-task $SLURM_CPUS_PER_TASK --wait 60 bash -c "numactl --membind=0-3 $TRAINING_CMD"
+srun -lu --mpi=pmix --network=disable_rdzv_get --environment=/users/$USER/lsaie-ss26-gipfelsturm/alps3.toml --cpus-per-task $SLURM_CPUS_PER_TASK --wait 60 bash -c "numactl --membind=0-3 $TRAINING_CMD"
 
 echo "END TIME: $(date)"
 FOOTER
