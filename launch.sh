@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time]
+# Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8] 
 #
 # Modes:     throughput  (50 steps, no logging)
 #            train       (N steps, with W&B and Tensorboard)
@@ -12,14 +12,14 @@
 # Time:      optional, format HH:MM:SS (default: 00:30:00 for throughput, 02:30:00 for train)
 #
 # Examples:  ./launch.sh throughput 760m
-#            ./launch.sh throughput 8b 50 1 00:45:00
+#            ./launch.sh throughput 8b 50 1 00:45:00 true bf16
 #            ./launch.sh train 760m 5000
-#            ./launch.sh train 1.5b 3000 8 03:00:00
+#            ./launch.sh train 1.5b 3000 8 03:00:00 true bf16
 
 set -euo pipefail
 
-MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time]}
-MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time]}
+MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8]}
+MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8]}
 
 ################ Mode config ################
 case $MODE in
@@ -34,9 +34,11 @@ case $MODE in
         WANDB=false
         ;;
     train)
-        TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes] [time]}
+        TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes] [time] [kernel fusion] [fp8]}
         NODES=${4:-4}
         TIME=${5:-02:30:00}
+        KERNEL_FUSION=${6:-false}
+        FP8=${7:-false}
         EVAL_INTERVAL=1000
         EVAL_ITERS=10
         LR_WARMUP_ITERS=200
@@ -86,7 +88,7 @@ esac
 
 GBS=256
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${TIME}-h"
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${TIME}-h-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -119,6 +121,7 @@ cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --account=lsaie-ss26
 #SBATCH --time=${TIME}
 #SBATCH --job-name=${JOB_NAME}
+#SBATCH --partition=debug
 #SBATCH --output=logs/%x-%j.log
 #SBATCH --error=logs/%x-%j.log
 #SBATCH --nodes=${NODES}
@@ -150,7 +153,7 @@ TRAINING_STEPS=${TRAINING_STEPS}
 
 # Logging
 PROJECT_NAME=gipfelsturm
-EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n
+EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}
 LOG_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/\$PROJECT_NAME/\$EXP_NAME
 TENSORBOARD_DIR=\$LOG_DIR/tensorboard
 CONFIGS
@@ -214,7 +217,10 @@ TRAINING_ARGS=(
     --no-check-for-nan-in-loss-and-grad
     --manual-gc
     --manual-gc-interval 50
+    ${KERNEL_FUSION:+--enable-cuda-graph}
 )
+
+
 
 REGULARIZATION_ARGS=(
     --attention-dropout 0.0
@@ -232,17 +238,27 @@ LEARNING_RATE_ARGS=(
 )
 TRAINING
 
-cat >> "$SCRIPT" << 'REST'
+
+if [ "$FP8" = "true" ]; then
+    cat >> "$SCRIPT" << FP8
+MIXED_PRECISION_ARGS=(
+    --fp8-format hybrid
+)
+FP8
+else
+cat >> "$SCRIPT" << BF16
+MIXED_PRECISION_ARGS=(
+    --bf16
+)
+BF16
+fi
+
+cat >> "$SCRIPT" << REST
 
 INITIALIZATION_ARGS=(
     --seed 42
     --init-method-std 0.02
 )
-
-MIXED_PRECISION_ARGS=(
-    --bf16
-)
-
 DISTRIBUTED_ARGS=(
     --tensor-model-parallel-size 1
     --pipeline-model-parallel-size 1
