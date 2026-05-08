@@ -242,6 +242,7 @@ TRAINING
 if [ "$FP8" = "true" ]; then
     cat >> "$SCRIPT" << FP8
 MIXED_PRECISION_ARGS=(
+    --bf16 
     --fp8-format hybrid
 )
 FP8
