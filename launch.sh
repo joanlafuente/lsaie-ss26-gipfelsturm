@@ -302,6 +302,11 @@ INITIALIZATION_ARGS=(
 DISTRIBUTED_ARGS=(
     --tensor-model-parallel-size 1
     --pipeline-model-parallel-size 1
+    # ZeRO-1/2 (already enabled): --use-distributed-optimizer shards optimizer states (ZeRO-1)
+    # and --overlap-grad-reduce shards gradients (ZeRO-2) across data-parallel ranks, reducing
+    # per-GPU memory and increasing utilization. --overlap-param-gather hides communication latency.
+    # ZeRO-3 (parameter sharding) is not possible here -> conflicts with tensor parallelism.
+    # To benchmark the impact, comment out all three lines below and compare throughput.
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
