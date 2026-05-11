@@ -32,6 +32,8 @@ case $MODE in
         LR_WARMUP_ITERS=10
         LOGGING_EXTRA=""
         WANDB=false
+        # `set -u` (line 19) crashes on any unset variable, so this must be defined in all branches.
+        CHECKPOINT_ARGS_CONTENT=""
         ;;
     train)
         TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes] [time] [kernel fusion] [fp8]}
@@ -47,6 +49,21 @@ case $MODE in
     --log-timers-to-tensorboard
     --log-memory-to-tensorboard"
         WANDB=true
+        # Graceful exit: the job saves a checkpoint and stops cleanly instead of being killed mid-step.
+        # Two flags complement each other:
+        #   --exit-duration-in-mins: after each step, stop if elapsed time > threshold (primary path).
+        #   --exit-signal-handler:   save on SLURM's kill warning (SIGTERM) as a fallback.
+        # We use a 5-min buffer because saving across many GPUs takes 1-3 min; SLURM's warning
+        # is only ~60 s (not enough time to save safely without the head start).
+        # --load is safe on first run: Megatron-LM starts fresh if no checkpoint exists yet.
+        #
+        # Split HH:MM:SS into total minutes minus 5-min buffer. e.g. 02:30:00 → 145.
+        EXIT_DURATION_MINS=$(awk -F: '{print $1*60+$2-5}' <<< "$TIME")
+        CHECKPOINT_ARGS_CONTENT="
+    --save \$LOG_DIR/checkpoints
+    --load \$LOG_DIR/checkpoints
+    --exit-signal-handler
+    --exit-duration-in-mins ${EXIT_DURATION_MINS}"
         ;;
     *)
         echo "Unknown mode: $MODE. Choose: throughput, train"
@@ -278,6 +295,15 @@ ${LOGGING_EXTRA}
 )
 LOGGING_EXTRA
 
+# launch.sh writes a .sbatch script that SLURM runs later on the cluster.
+# This block writes the CHECKPOINT_ARGS array into that generated script.
+# In throughput mode CHECKPOINT_ARGS_CONTENT is empty, so CHECKPOINT_ARGS=() -> expands to nothing.
+cat >> "$SCRIPT" << CKPT_BLOCK
+
+CHECKPOINT_ARGS=(${CHECKPOINT_ARGS_CONTENT}
+)
+CKPT_BLOCK
+
 cat >> "$SCRIPT" << 'TOKENIZER'
 
 TOKENIZER_ARGS=(
@@ -313,7 +339,8 @@ TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
     ${DISTRIBUTED_ARGS[@]} \
     ${LOGGING_ARGS[@]} \
     ${TOKENIZER_ARGS[@]} \
-    ${DATA_ARGS[@]}"
+    ${DATA_ARGS[@]} \
+    ${CHECKPOINT_ARGS[@]}"
 
 TOKENIZER
 
