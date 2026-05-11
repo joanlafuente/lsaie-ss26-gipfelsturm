@@ -34,6 +34,7 @@ case $MODE in
         WANDB=false
         # `set -u` (line 19) crashes on any unset variable, so this must be defined in all branches.
         CHECKPOINT_ARGS_CONTENT=""
+        RESUBMIT_BLOCK=""
         ;;
     train)
         TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes] [time] [kernel fusion] [fp8]}
@@ -59,11 +60,32 @@ case $MODE in
         #
         # Split HH:MM:SS into total minutes minus 5-min buffer. e.g. 02:30:00 → 145.
         EXIT_DURATION_MINS=$(awk -F: '{print $1*60+$2-5}' <<< "$TIME")
+        # NOTE: --save-interval is required by Megatron-LM whenever --save is set — it asserts
+        # both are provided at startup (arguments.py:838). Without it, training fails immediately
+        # before any steps run. This also enables the save-at-end call (training.py:1047) which
+        # saves a final checkpoint when training completes normally (before the time limit), so
+        # LATEST_ITER == TRAINING_STEPS and auto-resubmission correctly stops.
+        # Set to TRAINING_STEPS so only one checkpoint is written (at the very end), keeping
+        # I/O overhead minimal. Trade-off: a mid-job hardware crash means restarting from scratch.
+        # Lower this (e.g. 500) if node failures become a problem.
         CHECKPOINT_ARGS_CONTENT="
     --save \$LOG_DIR/checkpoints
     --load \$LOG_DIR/checkpoints
+    --save-interval \$TRAINING_STEPS
     --exit-signal-handler
     --exit-duration-in-mins ${EXIT_DURATION_MINS}"
+        # Auto-resubmit: after the job ends, check if training reached TRAINING_STEPS.
+        # Megatron-LM writes latest_checkpointed_iteration.txt on every checkpoint save.
+        # If not done, sbatch "$0" resubmits this exact script -> it loads the checkpoint
+        # via --load and continues from where it left off.
+        RESUBMIT_BLOCK='
+LATEST_ITER=$(cat $LOG_DIR/checkpoints/latest_checkpointed_iteration.txt 2>/dev/null || echo 0)
+if [ "$LATEST_ITER" -lt "$TRAINING_STEPS" ]; then
+    echo "[$(date)] Step $LATEST_ITER/$TRAINING_STEPS done — resubmitting."
+    sbatch "$0"
+else
+    echo "[$(date)] Training complete at step $LATEST_ITER."
+fi'
         ;;
     *)
         echo "Unknown mode: $MODE. Choose: throughput, train"
@@ -357,9 +379,16 @@ cat >> "$SCRIPT" << 'FOOTER'
 
 echo "CMD: $TRAINING_CMD"
 srun -lu --mpi=pmix --network=disable_rdzv_get --environment=/users/$USER/lsaie-ss26-gipfelsturm/alps3.toml --cpus-per-task $SLURM_CPUS_PER_TASK --wait 60 bash -c "numactl --membind=0-3 $TRAINING_CMD"
-
-echo "END TIME: $(date)"
 FOOTER
+
+# Inject resubmit logic after srun (empty in throughput mode — no-op).
+cat >> "$SCRIPT" << RESUBMIT
+${RESUBMIT_BLOCK}
+RESUBMIT
+
+cat >> "$SCRIPT" << 'CLOSING'
+echo "END TIME: $(date)"
+CLOSING
 
 chmod +x "$SCRIPT"
 
