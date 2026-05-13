@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8] 
+# Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8] [cut_cross_entropy]
 #
 # Modes:     throughput  (50 steps, no logging)
 #            train       (N steps, with W&B and Tensorboard)
@@ -18,8 +18,8 @@
 
 set -euo pipefail
 
-MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8]}
-MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8]}
+MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8] [cut_cross_entropy]}
+MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8] [cut_cross_entropy]}
 
 ################ Mode config ################
 case $MODE in
@@ -37,11 +37,12 @@ case $MODE in
         RESUBMIT_BLOCK=""
         ;;
     train)
-        TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes] [time] [kernel fusion] [fp8]}
+        TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes] [time] [kernel fusion] [fp8] [cut_cross_entropy]}
         NODES=${4:-4}
         TIME=${5:-02:30:00}
         KERNEL_FUSION=${6:-false}
         FP8=${7:-false}
+        CUT_CROSS_ENTROPY=${8:-false}
         EVAL_INTERVAL=1000
         EVAL_ITERS=10
         LR_WARMUP_ITERS=200
@@ -127,7 +128,7 @@ esac
 
 GBS=256
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${TIME}-h-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}"
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${TIME}-h-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-cut_cross_entropy-${CUT_CROSS_ENTROPY}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -192,7 +193,7 @@ TRAINING_STEPS=${TRAINING_STEPS}
 
 # Logging
 PROJECT_NAME=gipfelsturm
-EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}
+EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-cut_cross_entropy-${CUT_CROSS_ENTROPY}
 LOG_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/\$PROJECT_NAME/\$EXP_NAME
 TENSORBOARD_DIR=\$LOG_DIR/tensorboard
 CONFIGS
@@ -200,8 +201,8 @@ CONFIGS
 cat >> "$SCRIPT" << 'SETUP'
 
 #########################################
-
-mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR
+CHECKPOINT_DIR=$LOG_DIR/checkpoints
+mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR $CHECKPOINT_DIR
 
 cd $MEGATRON_LM_DIR
 flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && git checkout -- . && git apply $WORKDIR/patches/*.patch"
@@ -240,6 +241,20 @@ NETWORK_SIZE_ARGS=(
 )
 MODEL
 
+# 2. Cut Cross Entropy vs Standard Fusion
+if [ "$CUT_CROSS_ENTROPY" = "true" ]; then
+    CCE_ARG="--use-cut-cross-entropy"
+else
+    CCE_ARG="--cross-entropy-loss-fusion"
+fi
+
+# 3. Kernel Fusion
+if [ "$KERNEL_FUSION" = "true" ]; then
+    KF_ARG="--enable-cuda-graph"
+else
+    KF_ARG=""
+fi
+
 cat >> "$SCRIPT" << TRAINING
 
 TRAINING_ARGS=(
@@ -249,14 +264,14 @@ TRAINING_ARGS=(
     --log-interval 1
     --eval-interval ${EVAL_INTERVAL}
     --eval-iters ${EVAL_ITERS}
-    --cross-entropy-loss-fusion
     --disable-bias-linear
     --optimizer adam
     --dataloader-type single
     --no-check-for-nan-in-loss-and-grad
     --manual-gc
     --manual-gc-interval 50
-    ${KERNEL_FUSION:+--enable-cuda-graph}
+    $CCE_ARG
+    $KF_ARG
 )
 
 
@@ -355,7 +370,7 @@ TORCHRUN_ARGS=(
     --tee 3
 )
 
-TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
+TRAINING_CMD="python -m torch.distributed.run ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
     ${TRANSFORMER_ENGINE_ARGS[@]} \
     ${NETWORK_SIZE_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
@@ -383,13 +398,13 @@ WANDB_INSERT
 cat >> "$SCRIPT" << 'FOOTER'
 
 echo "CMD: $TRAINING_CMD"
-srun -lu --mpi=pmix --network=disable_rdzv_get --environment=/users/$USER/lsaie-ss26-gipfelsturm/alps3.toml --cpus-per-task $SLURM_CPUS_PER_TASK --wait 60 bash -c "numactl --membind=0-3 $TRAINING_CMD"
+srun -lu --mpi=pmix --network=disable_rdzv_get --environment=/users/$USER/lsaie-ss26-gipfelsturm/alps3.toml --cpus-per-task $SLURM_CPUS_PER_TASK --wait 60 bash -c "source /users/$USER/lsaie-ss26-gipfelsturm/my_env/bin/activate && numactl --membind=0-3 $TRAINING_CMD"
 FOOTER
 
 # Inject resubmit logic after srun (empty in throughput mode — no-op).
-cat >> "$SCRIPT" << RESUBMIT
-${RESUBMIT_BLOCK}
-RESUBMIT
+# cat >> "$SCRIPT" << RESUBMIT
+# ${RESUBMIT_BLOCK}
+# RESUBMIT
 
 cat >> "$SCRIPT" << 'CLOSING'
 echo "END TIME: $(date)"
