@@ -35,9 +35,12 @@ case $MODE in
         # `set -u` (line 19) crashes on any unset variable, so this must be defined in all branches.
         CHECKPOINT_ARGS_CONTENT=""
         RESUBMIT_BLOCK=""
+        KERNEL_FUSION=${6:-false}
+        FP8=${7:-false}
+        CUT_CROSS_ENTROPY=${8:-false}
         ;;
     train)
-        TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes] [time] [kernel fusion] [fp8] [cut_cross_entropy]}
+        TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes] [time] [kernel fusion] [fp8] [cut_cross_entropy] [fp4]}
         NODES=${4:-4}
         TIME=${5:-02:30:00}
         KERNEL_FUSION=${6:-false}
@@ -241,14 +244,12 @@ NETWORK_SIZE_ARGS=(
 )
 MODEL
 
-# 2. Cut Cross Entropy vs Standard Fusion
 if [ "$CUT_CROSS_ENTROPY" = "true" ]; then
     CCE_ARG="--use-cut-cross-entropy"
 else
     CCE_ARG="--cross-entropy-loss-fusion"
 fi
 
-# 3. Kernel Fusion
 if [ "$KERNEL_FUSION" = "true" ]; then
     KF_ARG="--enable-cuda-graph"
 else
@@ -273,8 +274,6 @@ TRAINING_ARGS=(
     $CCE_ARG
     $KF_ARG
 )
-
-
 
 REGULARIZATION_ARGS=(
     --attention-dropout 0.0
@@ -337,9 +336,6 @@ ${LOGGING_EXTRA}
 )
 LOGGING_EXTRA
 
-# launch.sh writes a .sbatch script that SLURM runs later on the cluster.
-# This block writes the CHECKPOINT_ARGS array into that generated script.
-# In throughput mode CHECKPOINT_ARGS_CONTENT is empty, so CHECKPOINT_ARGS=() -> expands to nothing.
 cat >> "$SCRIPT" << CKPT_BLOCK
 
 CHECKPOINT_ARGS=(${CHECKPOINT_ARGS_CONTENT}
