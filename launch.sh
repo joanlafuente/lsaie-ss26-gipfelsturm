@@ -164,7 +164,7 @@ cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --account=lsaie-ss26
 #SBATCH --time=${TIME}
 #SBATCH --job-name=${JOB_NAME}
-#SBATCH --partition=debug
+#SBATCH --partition=normal
 #SBATCH --output=logs/%x-%j.log
 #SBATCH --error=logs/%x-%j.log
 #SBATCH --nodes=${NODES}
