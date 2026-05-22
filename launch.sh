@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8] [cut_cross_entropy]
+# Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [time] [kernel fusion] [fp8] [cut_cross_entropy] [num_experts]
 #
 # Modes:     throughput  (50 steps, no logging)
 #            train       (N steps, with W&B and Tensorboard)
@@ -38,6 +38,7 @@ case $MODE in
         KERNEL_FUSION=${6:-false}
         FP8=${7:-false}
         CUT_CROSS_ENTROPY=${8:-false}
+        NUM_EXPERTS=${9:-0}
         ;;
     train)
         TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes] [time] [kernel fusion] [fp8] [cut_cross_entropy] [fp4]}
@@ -131,7 +132,7 @@ esac
 
 GBS=256
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${TIME}-h-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-cut_cross_entropy-${CUT_CROSS_ENTROPY}"
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${TIME}-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-cut_cross_entropy-${CUT_CROSS_ENTROPY}-moe-${NUM_EXPERTS}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -196,7 +197,7 @@ TRAINING_STEPS=${TRAINING_STEPS}
 
 # Logging
 PROJECT_NAME=gipfelsturm
-EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-cut_cross_entropy-${CUT_CROSS_ENTROPY}
+EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-cut_cross_entropy-${CUT_CROSS_ENTROPY}-moe-${NUM_EXPERTS}
 LOG_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/\$PROJECT_NAME/\$EXP_NAME
 TENSORBOARD_DIR=\$LOG_DIR/tensorboard
 CONFIGS
@@ -227,6 +228,21 @@ TRANSFORMER_ENGINE_ARGS=(
 
 SETUP
 
+# MoE: NUM_EXPERTS=0 means dense (no MoE). Any other value enables MoE with that many experts.
+# topk=1 keeps per-token FLOPs identical to the dense baseline (each token routes to 1 expert),
+# isolating routing overhead for a fair throughput comparison. aux_loss load balancing prevents
+# all tokens collapsing to a single expert. moe-aux-loss-coeff=0.01 is standard for stability.
+# To benchmark: run with num_experts=0,2,4,8 and compare tokens/sec vs the dense baseline.
+if [ "${NUM_EXPERTS}" != "0" ]; then
+    MOE_ARGS="
+    --num-experts ${NUM_EXPERTS}
+    --moe-router-topk 1
+    --moe-router-load-balancing-type aux_loss
+    --moe-aux-loss-coeff 0.01"
+else
+    MOE_ARGS=""
+fi
+
 cat >> "$SCRIPT" << MODEL
 NETWORK_SIZE_ARGS=(
     --num-layers ${NUM_LAYERS}
@@ -241,6 +257,7 @@ NETWORK_SIZE_ARGS=(
     --swiglu
     --untie-embeddings-and-output-weights
     --seq-length \$SEQ_LEN
+${MOE_ARGS}
 )
 MODEL
 
