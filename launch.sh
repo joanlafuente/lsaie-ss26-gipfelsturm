@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Usage: ./launch.sh <mode> <model_size> [partition] [steps] [nodes] [time] [MBS_multiplier] [kernel fusion] [fp8] [fp8_recipe] [cut_cross_entropy]
+# Usage: ./launch.sh <mode> <model_size> [partition] [steps] [nodes] [time] [MBS_multiplier] [kernel fusion] [fp8] [fp8_recipe] [cut_cross_entropy] [num_experts]
 #
 # Modes:     throughput  (50 steps, no logging)
 #            train       (N steps, with W&B and Tensorboard)
@@ -17,15 +17,16 @@
 # hybrid Uses e4m3 (4 exponent bits, 3 mantissa bits) for the forward pass where high precision is required to capture subtle weight and activation variances. 
 # It switches to E5M2 (5 exponent bits, 2 mantissa bits) for the backward pass to handle the significantly wider dynamic range of gradients without overflowing.
 # FP8 Recipe:     optional, options: delayed, blockwise (default: delayed)
+# Num Experts:    optional, default 0 (0 means dense/no MoE, >0 enables MoE)
 #
 # Examples:  ./launch.sh throughput 760m
-#            ./launch.sh throughput 8b debug 50 1 00:30:00 2 true true blockwise true
+#            ./launch.sh throughput 8b debug 50 1 00:30:00 2 true true blockwise true 8
 #            ./launch.sh train 760m normal 5000
-#            ./launch.sh train 1.5b normal 3000 8 03:00:00 0.5 true true delayed true
+#            ./launch.sh train 1.5b normal 3000 8 03:00:00 0.5 true true delayed true 4
 
 set -euo pipefail
 
-USAGE_MSG="Usage: ./launch.sh <mode> <model_size> [partition] [steps] [nodes] [time] [MBS_multiplier] [kernel fusion] [fp8] [fp8_recipe] [cut_cross_entropy]"
+USAGE_MSG="Usage: ./launch.sh <mode> <model_size> [partition] [steps] [nodes] [time] [MBS_multiplier] [kernel fusion] [fp8] [fp8_recipe] [cut_cross_entropy] [num_experts]"
 MODE=${1:?$USAGE_MSG}
 MODEL_SIZE=${2:?$USAGE_MSG}
 
@@ -41,6 +42,7 @@ case $MODE in
         FP8=${9:-false}
         FP8_RECIPE=${10:-delayed}
         CUT_CROSS_ENTROPY=${11:-false}
+        NUM_EXPERTS=${12:-0}
         
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
@@ -52,7 +54,7 @@ case $MODE in
         ;;
     train)
         PARTITION=${3:-normal}
-        TRAINING_STEPS=${4:?Usage: ./launch.sh train <model_size> [partition] <steps> [nodes] [time] [MBS_multiplier] [kernel fusion] [fp8] [fp8_recipe] [cut_cross_entropy]}
+        TRAINING_STEPS=${4:?Usage: ./launch.sh train <model_size> [partition] <steps> [nodes] [time] [MBS_multiplier] [kernel fusion] [fp8] [fp8_recipe] [cut_cross_entropy] [num_experts]}
         NODES=${5:-4}
         TIME=${6:-02:30:00}
         MBS_MULTIPLIER=${7:-1}
@@ -60,6 +62,7 @@ case $MODE in
         FP8=${9:-false}
         FP8_RECIPE=${10:-delayed}
         CUT_CROSS_ENTROPY=${11:-false}
+        NUM_EXPERTS=${12:-0}
         
         EVAL_INTERVAL=1000
         EVAL_ITERS=10
@@ -70,7 +73,25 @@ case $MODE in
     --log-memory-to-tensorboard"
         WANDB=true
         
+        # Graceful exit: the job saves a checkpoint and stops cleanly instead of being killed mid-step.
+        # Two flags complement each other:
+        #   --exit-duration-in-mins: after each step, stop if elapsed time > threshold (primary path).
+        #   --exit-signal-handler:   save on SLURM's kill warning (SIGTERM) as a fallback.
+        # We use a 5-min buffer because saving across many GPUs takes 1-3 min; SLURM's warning
+        # is only ~60 s (not enough time to save safely without the head start).
+        # --load is safe on first run: Megatron-LM starts fresh if no checkpoint exists yet.
+        #
+        # Split HH:MM:SS into total minutes minus 5-min buffer. e.g. 02:30:00 → 145.
         EXIT_DURATION_MINS=$(awk -F: '{print $1*60+$2-5}' <<< "$TIME")
+        
+        # NOTE: --save-interval is required by Megatron-LM whenever --save is set — it asserts
+        # both are provided at startup (arguments.py:838). Without it, training fails immediately
+        # before any steps run. This also enables the save-at-end call (training.py:1047) which
+        # saves a final checkpoint when training completes normally (before the time limit), so
+        # LATEST_ITER == TRAINING_STEPS and auto-resubmission correctly stops.
+        # Set to TRAINING_STEPS so only one checkpoint is written (at the very end), keeping
+        # I/O overhead minimal. Trade-off: a mid-job hardware crash means restarting from scratch.
+        # Lower this (e.g. 500) if node failures become a problem.
         CHECKPOINT_ARGS_CONTENT="
     --save \$LOG_DIR/checkpoints
     --load \$LOG_DIR/checkpoints
@@ -78,6 +99,10 @@ case $MODE in
     --exit-signal-handler
     --exit-duration-in-mins ${EXIT_DURATION_MINS}"
         
+        # Auto-resubmit: after the job ends, check if training reached TRAINING_STEPS.
+        # Megatron-LM writes latest_checkpointed_iteration.txt on every checkpoint save.
+        # If not done, sbatch "$0" resubmits this exact script -> it loads the checkpoint
+        # via --load and continues from where it left off.
         RESUBMIT_BLOCK='
 LATEST_ITER=$(cat $LOG_DIR/checkpoints/latest_checkpointed_iteration.txt 2>/dev/null || echo 0)
 if [ "$LATEST_ITER" -lt "$TRAINING_STEPS" ]; then
@@ -145,7 +170,7 @@ fi
 
 GBS=256
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${TIME}-mbsx${MBS_MULTIPLIER}-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-recipe-${FP8_RECIPE}-cut_cross_entropy-${CUT_CROSS_ENTROPY}"
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${TIME}-mbsx${MBS_MULTIPLIER}-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-recipe-${FP8_RECIPE}-cut_cross_entropy-${CUT_CROSS_ENTROPY}-moe-${NUM_EXPERTS}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -210,27 +235,27 @@ TRAINING_STEPS=${TRAINING_STEPS}
 
 # Logging
 PROJECT_NAME=gipfelsturm
-EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n-mbsx${MBS_MULTIPLIER}-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-recipe-${FP8_RECIPE}-cut_cross_entropy-${CUT_CROSS_ENTROPY}
+EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n-mbsx${MBS_MULTIPLIER}-kernel_fusion-${KERNEL_FUSION}-fp8-${FP8}-recipe-${FP8_RECIPE}-cut_cross_entropy-${CUT_CROSS_ENTROPY}-moe-${NUM_EXPERTS}
 LOG_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/\$PROJECT_NAME/\$EXP_NAME
 TENSORBOARD_DIR=\$LOG_DIR/tensorboard
 CONFIGS
 
-cat >> "$SCRIPT" << SETUP
+cat >> "$SCRIPT" << 'SETUP'
 
 #########################################
-CHECKPOINT_DIR=\$LOG_DIR/checkpoints
-mkdir -p logs \$LOG_DIR \$TENSORBOARD_DIR \$DATASET_CACHE_DIR \$CHECKPOINT_DIR
+CHECKPOINT_DIR=$LOG_DIR/checkpoints
+mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR $CHECKPOINT_DIR
 
-cd \$MEGATRON_LM_DIR
-flock \$MEGATRON_LM_DIR/.git-lock bash -c "cd \$MEGATRON_LM_DIR && git checkout -- . && git apply \$WORKDIR/patches/*.patch"
-export PYTHONPATH=\$MEGATRON_LM_DIR:\$PYTHONPATH
+cd $MEGATRON_LM_DIR
+flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && git checkout -- . && git apply $WORKDIR/patches/*.patch"
+export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export TRITON_CACHE_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/.triton_cache
-export TORCHINDUCTOR_CACHE_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/.inductor_cache
-export OMP_NUM_THREADS=\$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
-MASTER_ADDR=\$(hostname)
+export TRITON_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.triton_cache
+export TORCHINDUCTOR_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.inductor_cache
+export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
+MASTER_ADDR=$(hostname)
 MASTER_PORT=25678
 
 # If using blockwise microscaling, enforce Transformer Engine scale protection
@@ -246,6 +271,21 @@ TRANSFORMER_ENGINE_ARGS=(
 
 SETUP
 
+# MoE: NUM_EXPERTS=0 means dense (no MoE). Any other value enables MoE with that many experts.
+# topk=1 keeps per-token FLOPs identical to the dense baseline (each token routes to 1 expert),
+# isolating routing overhead for a fair throughput comparison. aux_loss load balancing prevents
+# all tokens collapsing to a single expert. moe-aux-loss-coeff=0.01 is standard for stability.
+# To benchmark: run with num_experts=0,2,4,8 and compare tokens/sec vs the dense baseline.
+if [ "${NUM_EXPERTS}" != "0" ]; then
+    MOE_ARGS="
+    --num-experts ${NUM_EXPERTS}
+    --moe-router-topk 1
+    --moe-router-load-balancing-type aux_loss
+    --moe-aux-loss-coeff 0.01"
+else
+    MOE_ARGS=""
+fi
+
 cat >> "$SCRIPT" << MODEL
 NETWORK_SIZE_ARGS=(
     --num-layers ${NUM_LAYERS}
@@ -260,6 +300,7 @@ NETWORK_SIZE_ARGS=(
     --swiglu
     --untie-embeddings-and-output-weights
     --seq-length \$SEQ_LEN
+${MOE_ARGS}
 )
 MODEL
 
@@ -336,6 +377,11 @@ INITIALIZATION_ARGS=(
 DISTRIBUTED_ARGS=(
     --tensor-model-parallel-size 1
     --pipeline-model-parallel-size 1
+    # ZeRO-1/2 (already enabled): --use-distributed-optimizer shards optimizer states (ZeRO-1)
+    # and --overlap-grad-reduce shards gradients (ZeRO-2) across data-parallel ranks, reducing
+    # per-GPU memory and increasing utilization. --overlap-param-gather hides communication latency.
+    # ZeRO-3 (parameter sharding) is not possible here -> conflicts with tensor parallelism.
+    # To benchmark the impact, comment out all three lines below and compare throughput.
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
