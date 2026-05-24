@@ -29,10 +29,10 @@
 #
 # Applied to: Megatron-LM core_v0.16.1
 #
-diff --git a/megatron/training/training.py b/megatron/training/training.py
-index d61b9357a..a51a9846a 100644
---- a/megatron/training/training.py
-+++ b/megatron/training/training.py
+diff --git a/Megatron-LM-repo/megatron/training/training.py b/Megatron-LM-repo/megatron/training/training.py
+index d61b935..a51a984 100644
+--- a/Megatron-LM-repo/megatron/training/training.py
++++ b/Megatron-LM-repo/megatron/training/training.py
 @@ -2041,12 +2041,18 @@ def training_log(
              elapsed_time_per_iteration * 1000.0
          )
