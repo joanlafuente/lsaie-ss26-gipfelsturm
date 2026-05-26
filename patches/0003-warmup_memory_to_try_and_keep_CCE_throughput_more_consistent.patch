@@ -1,0 +1,118 @@
+Subject: [PATCH] Warmup memory to try and keep CCE throughput more consistent
+---
+Index: Megatron-LM-repo/megatron/training/arguments.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/Megatron-LM-repo/megatron/training/arguments.py b/Megatron-LM-repo/megatron/training/arguments.py
+--- a/Megatron-LM-repo/megatron/training/arguments.py	(revision 5aea96d43d4fe7de05d606d73e041d230bcf202b)
++++ b/Megatron-LM-repo/megatron/training/arguments.py	(date 1779799970698)
+@@ -2022,6 +2022,15 @@
+                        help='Disables creation and usage of Gloo process groups.')
+     group.add_argument('--tp-comm-overlap-cfg', type=str, default=None,
+                        help='Config file when tp_comm_overlap is enabled.')
++    group.add_argument('--use-cut-cross-entropy', action='store_true',
++                       help='Use cut cross entropy loss instead of standard cross entropy. Reduces the memory usage of the loss computation. Only implemented for GPT models')
++    group.add_argument('--cce-allocator-warmup-fraction', type=float, default=0.0,
++                       help='Fraction of free GPU memory to pre-reserve in the CUDA allocator '
++                            'cache before training starts when using --use-cut-cross-entropy. '
++                            'The block is allocated then freed (without empty_cache), giving CCE '
++                            'a large contiguous pool for vocabulary tiling from step 1 and '
++                            'avoiding the ~50-250 step warm-up period. Typical range: 0.7-0.85. '
++                            'Set to 0 (default) to disable.')
+ 
+     # deprecated
+     group.add_argument('--checkpoint-activations', action='store_true',
+Index: Megatron-LM-repo/megatron/training/training.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/Megatron-LM-repo/megatron/training/training.py b/Megatron-LM-repo/megatron/training/training.py
+--- a/Megatron-LM-repo/megatron/training/training.py	(revision 5aea96d43d4fe7de05d606d73e041d230bcf202b)
++++ b/Megatron-LM-repo/megatron/training/training.py	(date 1779799924472)
+@@ -2414,6 +2414,69 @@
+     return False
+ 
+ 
++def _prewarm_optimizer_states(optimizer):
++    """Pre-allocate Adam moment buffers (exp_avg, exp_avg_sq) before training starts.
++
++    Without this, the buffers are allocated lazily on the first optimizer step.
++    Pre-allocating them ensures the CUDA memory footprint is at its steady-state
++    level from step 1, so CCE can pick a stable tile size immediately.
++    """
++    from megatron.core.optimizer.optimizer import ChainedOptimizer
++
++    leaf_optimizers = (
++        optimizer.chained_optimizers
++        if isinstance(optimizer, ChainedOptimizer)
++        else [optimizer]
++    )
++
++    for leaf_opt in leaf_optimizers:
++        init_fn = getattr(leaf_opt, 'init_state_fn', None)
++        inner = getattr(leaf_opt, 'optimizer', None)
++        if init_fn is not None and inner is not None:
++            config = getattr(leaf_opt, 'config', None)
++            init_fn(inner, config)
++
++
++def _prewarm_cce_allocator(args):
++    """Prime the CUDA caching allocator to its steady-state high-watermark.
++
++    Allocates a large dummy tensor (controlled by --cce-allocator-warmup-fraction)
++    and immediately frees it. The freed block stays in the allocator's cache —
++    do NOT call torch.cuda.empty_cache() after this. The cached block gives CCE
++    a large contiguous pool for its vocabulary tiling from the very first step,
++    matching the tile size it would otherwise only reach after ~250 warm-up steps.
++
++    A fraction of 0.7–0.85 is typical; start lower if OOM errors occur.
++    """
++    fraction = getattr(args, 'cce_allocator_warmup_fraction', 0.0)
++    if fraction <= 0.0:
++        return
++
++    device = torch.cuda.current_device()
++    free_bytes, _ = torch.cuda.mem_get_info(device)
++    reserve_bytes = int(free_bytes * fraction)
++    # float16 = 2 bytes per element
++    reserve_elements = reserve_bytes // 2
++
++    if reserve_elements <= 0:
++        return
++
++    try:
++        dummy = torch.empty(reserve_elements, dtype=torch.float16, device=device)
++        del dummy
++        # Intentionally no torch.cuda.empty_cache() — the freed block stays in
++        # the allocator's cache as a large contiguous pool for CCE tiling.
++        print_rank_0(
++            f'> CCE allocator warmup: primed {reserve_bytes / 1e9:.2f} GB '
++            f'in CUDA allocator cache (fraction={fraction}).'
++        )
++    except torch.cuda.OutOfMemoryError:
++        print_rank_0(
++            f'> CCE allocator warmup: could not allocate '
++            f'{reserve_bytes / 1e9:.2f} GB — skipping (try a smaller fraction).'
++        )
++
++
+ def train(
+     forward_step_func,
+     model,
+@@ -2679,6 +2742,13 @@
+             optimizers=[optimizer],
+         )
+ 
++    # Option 2: Pre-allocate Adam moment buffers so memory is at steady-state from step 1.
++    # Option 3: Prime the CUDA allocator cache with a large dummy block for CCE tiling.
++    if getattr(args, 'use_cut_cross_entropy', False) and iteration == 0:
++        _prewarm_optimizer_states(optimizer)
++        print_rank_0('> CCE warmup: optimizer moment buffers pre-allocated.')
++        _prewarm_cce_allocator(args)
++
+     # Run training iterations till done.
+     buffered_rollouts = None
+     while iteration < args.train_iters:
