@@ -68,6 +68,7 @@ case $MODE in
         EVAL_ITERS=10
         LR_WARMUP_ITERS=200
         LOGGING_EXTRA="
+    --log-throughput
     --tensorboard-dir \$TENSORBOARD_DIR
     --log-timers-to-tensorboard
     --log-memory-to-tensorboard"
@@ -82,8 +83,13 @@ case $MODE in
         # --load is safe on first run: Megatron-LM starts fresh if no checkpoint exists yet.
         #
         # Split HH:MM:SS into total minutes minus 5-min buffer. e.g. 02:30:00 → 145.
+        # --exit-duration-in-mins counts from when TRAINING starts (after model build, NCCL init,
+        # dataset build), NOT from job start. We subtract 5 min so the checkpoint writer has time
+        # to finish (~1-3 min) before SLURM kills the job. --exit-signal-handler acts as a backup:
+        # if init is slow (large models: 8-10 min) and the exit timer would fire past the wall limit,
+        # SLURM's SIGTERM triggers a checkpoint save instead.
         EXIT_DURATION_MINS=$(awk -F: '{print $1*60+$2-5}' <<< "$TIME")
-        
+
         # NOTE: --save-interval is required by Megatron-LM whenever --save is set — it asserts
         # both are provided at startup (arguments.py:838). Without it, training fails immediately
         # before any steps run. This also enables the save-at-end call (training.py:1047) which
@@ -98,6 +104,14 @@ case $MODE in
     --save-interval \$TRAINING_STEPS
     --exit-signal-handler
     --exit-duration-in-mins ${EXIT_DURATION_MINS}"
+        # NOTE: if checkpoint loading fails with:
+        #   AttributeError: 'bool' object has no attribute 'dtype'  (fused_adam.py set_scaled_state)
+        # it is a TE/Megatron bug with --use-precision-aware-optimizer checkpoint format.
+        # Workaround A (resume without optimizer state): add --no-load-optim above.
+        # Workaround B (proper fix, requires fresh start):
+        #   1. Remove --use-precision-aware-optimizer and --main-grads-dtype bf16 from
+        #      TRANSFORMER_ENGINE_ARGS — those flags cause the broken checkpoint format.
+        #   2. Delete existing checkpoints: rm -rf $LOG_DIR/checkpoints
         
         # Auto-resubmit: after the job ends, check if training reached TRAINING_STEPS.
         # Megatron-LM writes latest_checkpointed_iteration.txt on every checkpoint save.
@@ -107,6 +121,7 @@ case $MODE in
 LATEST_ITER=$(cat $LOG_DIR/checkpoints/latest_checkpointed_iteration.txt 2>/dev/null || echo 0)
 if [ "$LATEST_ITER" -lt "$TRAINING_STEPS" ]; then
     echo "[$(date)] Step $LATEST_ITER/$TRAINING_STEPS done — resubmitting."
+    cd /users/$USER/lsaie-ss26-gipfelsturm
     sbatch "$0"
 else
     echo "[$(date)] Training complete at step $LATEST_ITER."
@@ -246,8 +261,10 @@ cat >> "$SCRIPT" << 'SETUP'
 CHECKPOINT_DIR=$LOG_DIR/checkpoints
 mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR $CHECKPOINT_DIR
 
+ulimit -c 0  # disable core dumps (they write to home dir and exhaust quota)
+
 cd $MEGATRON_LM_DIR
-flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && git checkout -- . && git apply $WORKDIR/patches/*.patch"
+flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && git checkout -- . && git apply $WORKDIR/patches/0001-log-tokens-per-sec-to-wandb.patch && git apply $WORKDIR/patches/0003-fix-energy-monitor-nvml-sigsegv-on-gh200.patch"
 export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
@@ -265,8 +282,11 @@ fi
 
 TRANSFORMER_ENGINE_ARGS=(
     --transformer-impl transformer_engine
-    --use-precision-aware-optimizer
-    --main-grads-dtype bf16
+    # --use-precision-aware-optimizer and --main-grads-dtype bf16 are disabled:
+    # they cause a TE/Megatron bug where optimizer state is saved with a boolean instead of
+    # a tensor, making checkpoint loading crash with:
+    #   AttributeError: 'bool' object has no attribute 'dtype'  (fused_adam.py:350)
+    # Re-enable only if the upstream bug is fixed and you delete existing checkpoints first.
 )
 
 SETUP
@@ -280,6 +300,7 @@ if [ "${NUM_EXPERTS}" != "0" ]; then
     MOE_ARGS="
     --num-experts ${NUM_EXPERTS}
     --moe-router-topk 1
+    --moe-router-pre-softmax
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 0.01"
 else
@@ -383,12 +404,9 @@ DISTRIBUTED_ARGS=(
     # ZeRO-3 (parameter sharding) is not possible here -> conflicts with tensor parallelism.
     # To benchmark the impact, comment out all three lines below and compare throughput.
     --use-distributed-optimizer
-    --overlap-grad-reduce
-    --overlap-param-gather
 )
 
 LOGGING_ARGS=(
-    --log-throughput
     --log-progress
 REST
 
@@ -455,13 +473,13 @@ WANDB_INSERT
 cat >> "$SCRIPT" << 'FOOTER'
 
 echo "CMD: $TRAINING_CMD"
-srun -lu --mpi=pmix --network=disable_rdzv_get --environment=/users/$USER/lsaie-ss26-gipfelsturm/alps3.toml --cpus-per-task $SLURM_CPUS_PER_TASK --wait 60 bash -c "source /users/$USER/lsaie-ss26-gipfelsturm/my_env/bin/activate && numactl --membind=0-3 $TRAINING_CMD"
+srun -lu --mpi=pmix --network=disable_rdzv_get --environment=/users/$USER/lsaie-ss26-gipfelsturm/alps3.toml --cpus-per-task $SLURM_CPUS_PER_TASK --wait 60 bash -c "numactl --membind=0-3 $TRAINING_CMD"
 FOOTER
 
 # Inject resubmit logic after srun (empty in throughput mode — no-op).
-# cat >> "$SCRIPT" << RESUBMIT
-# ${RESUBMIT_BLOCK}
-# RESUBMIT
+cat >> "$SCRIPT" << RESUBMIT
+${RESUBMIT_BLOCK}
+RESUBMIT
 
 cat >> "$SCRIPT" << 'CLOSING'
 echo "END TIME: $(date)"

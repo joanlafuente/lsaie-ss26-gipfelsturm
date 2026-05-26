@@ -11,16 +11,14 @@ diff --git a/Megatron-LM-repo/megatron/core/models/common/language_module/langua
 index b0fa612..81bed36 100644
 --- a/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py
 +++ b/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py
-@@ -9,6 +9,8 @@ from torch import Tensor
+@@ -9,6 +9,6 @@ from torch import Tensor
  from megatron.core import parallel_state, tensor_parallel
  from megatron.core.dist_checkpointing.mapping import ShardedStateDict
- 
-+from cut_cross_entropy import linear_cross_entropy, VocabParallelOptions
-+
+
  try:
      from megatron.core.extensions.transformer_engine import te_parallel_cross_entropy
  except:
-@@ -170,6 +172,57 @@ class LanguageModule(MegatronModule):
+@@ -170,6 +170,58 @@ class LanguageModule(MegatronModule):
          loss = loss.transpose(0, 1).contiguous()
          return loss
  
@@ -34,6 +32,7 @@ index b0fa612..81bed36 100644
 +            """
 +            Computes the vocab-parallel language model loss using Apple's Cut Cross-Entropy.
 +            """
++            from cut_cross_entropy import linear_cross_entropy, VocabParallelOptions
 +            # [b s] => [s b]
 +            labels = labels.transpose(0, 1).contiguous()
 +                
