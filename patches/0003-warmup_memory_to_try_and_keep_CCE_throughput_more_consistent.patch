@@ -1,4 +1,4 @@
-Subject: [PATCH] Warmup memory to try and keep CCE throughput more consistent
+Subject: [PATCH] Patch that should implement an attempt pre-allocate memory to get more consistent TP (hopefully fixed)
 ---
 Index: Megatron-LM-repo/megatron/training/arguments.py
 IDEA additional info:
@@ -6,7 +6,7 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
 diff --git a/Megatron-LM-repo/megatron/training/arguments.py b/Megatron-LM-repo/megatron/training/arguments.py
---- a/Megatron-LM-repo/megatron/training/arguments.py	(revision 5aea96d43d4fe7de05d606d73e041d230bcf202b)
+--- a/Megatron-LM-repo/megatron/training/arguments.py	(revision 54ad5fafc4a0949c13642f77eddfa39cc075159e)
 +++ b/Megatron-LM-repo/megatron/training/arguments.py	(date 1779799970698)
 @@ -2022,6 +2022,15 @@
                         help='Disables creation and usage of Gloo process groups.')
@@ -24,13 +24,84 @@ diff --git a/Megatron-LM-repo/megatron/training/arguments.py b/Megatron-LM-repo/
  
      # deprecated
      group.add_argument('--checkpoint-activations', action='store_true',
+Index: Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py b/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py
+--- a/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py	(revision 54ad5fafc4a0949c13642f77eddfa39cc075159e)
++++ b/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py	(date 1779886961232)
+@@ -170,6 +170,62 @@
+         loss = loss.transpose(0, 1).contiguous()
+         return loss
+ 
++    def compute_language_model_loss_CCE(
++            self,
++            labels: Tensor,
++            hidden_states: Tensor,
++            weight: Tensor,
++            bias: Optional[Tensor] = None
++        ) -> Tensor:
++            """
++            Computes the vocab-parallel language model loss using Apple's Cut Cross-Entropy.
++            """
++            # hidden_states: [s, b, h],  labels: [b, s]
++            s, b, h = hidden_states.shape
++
++            # Flatten to 2D/1D so CCE returns a 1D loss tensor.
++            # This avoids a non-contiguous gradient in CCE's backward: if we passed
++            # [s, b] and got [s, b] back, the transpose in the return path would make
++            # the gradient non-contiguous and break grad_out.view(-1) inside CCE.
++            # Token ordering: index k = i*b + j  <->  seq_pos i, batch j.
++            hidden_flat = hidden_states.reshape(s * b, h)            # [s*b, h]
++            labels_flat = labels.transpose(0, 1).reshape(-1)         # [b,s]->[s,b]->flat [s*b]
++
++            tp_group = self.pg_collection.tp
++            tp_rank = torch.distributed.get_rank(group=tp_group)
++
++            # Fix for ZERO-2 (as we are not computing the logits in the output layer we are not using the hooks)
++            weight_module = self.embedding.word_embeddings if self.share_embeddings_and_output_weights else self.output_layer
++
++            if hasattr(weight_module, '_forward_pre_hooks'):
++                for hook in weight_module._forward_pre_hooks.values():
++                    hook(weight_module, (hidden_states,))
++
++            per_partition_vocab_size = weight.shape[0]
++            vocab_start_index = tp_rank * per_partition_vocab_size
++            vocab_stop_index = vocab_start_index + per_partition_vocab_size
++
++            vp_opts = VocabParallelOptions(
++                vocab_start_index,
++                vocab_stop_index,
++                group=tp_group
++            )
++
++            # Returns [s*b] — 1D output means the backward gradient is already flat
++            # and contiguous, so CCE's grad_out.view(-1) always succeeds.
++            loss = linear_cross_entropy(
++                hidden_flat,
++                weight,
++                labels_flat,
++                bias=bias,
++                vocab_parallel_options=vp_opts,
++                reduction='none'
++            )
++
++            # [s*b] => [s, b] => [b, s]
++            return loss.reshape(s, b).transpose(0, 1).contiguous()
++
++
+     def setup_embeddings_and_output_layer(self) -> None:
+         """Sets up embedding layer in first stage and output layer in last stage.
+ 
 Index: Megatron-LM-repo/megatron/training/training.py
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
 diff --git a/Megatron-LM-repo/megatron/training/training.py b/Megatron-LM-repo/megatron/training/training.py
---- a/Megatron-LM-repo/megatron/training/training.py	(revision 5aea96d43d4fe7de05d606d73e041d230bcf202b)
+--- a/Megatron-LM-repo/megatron/training/training.py	(revision 54ad5fafc4a0949c13642f77eddfa39cc075159e)
 +++ b/Megatron-LM-repo/megatron/training/training.py	(date 1779799924472)
 @@ -2414,6 +2414,69 @@
      return False
