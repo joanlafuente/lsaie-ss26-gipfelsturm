@@ -1,4 +1,4 @@
-Subject: [PATCH] Patch that should implement an attempt pre-allocate memory to get more consistent TP (hopefully fixed)
+Subject: [PATCH] CCE-Loss part 2
 ---
 Index: Megatron-LM-repo/megatron/training/arguments.py
 IDEA additional info:
@@ -6,7 +6,7 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
 diff --git a/Megatron-LM-repo/megatron/training/arguments.py b/Megatron-LM-repo/megatron/training/arguments.py
---- a/Megatron-LM-repo/megatron/training/arguments.py	(revision 54ad5fafc4a0949c13642f77eddfa39cc075159e)
+--- a/Megatron-LM-repo/megatron/training/arguments.py	(revision 7589f671f32ccd378e2ed910ac71e7b5170ab512)
 +++ b/Megatron-LM-repo/megatron/training/arguments.py	(date 1779799970698)
 @@ -2022,6 +2022,15 @@
                         help='Disables creation and usage of Gloo process groups.')
@@ -30,9 +30,9 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
 diff --git a/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py b/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py
---- a/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py	(revision 54ad5fafc4a0949c13642f77eddfa39cc075159e)
-+++ b/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py	(date 1779886961232)
-@@ -170,6 +170,62 @@
+--- a/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py	(revision 7589f671f32ccd378e2ed910ac71e7b5170ab512)
++++ b/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py	(date 1779970230841)
+@@ -170,6 +170,65 @@
          loss = loss.transpose(0, 1).contiguous()
          return loss
  
@@ -77,8 +77,9 @@ diff --git a/Megatron-LM-repo/megatron/core/models/common/language_module/langua
 +                group=tp_group
 +            )
 +
-+            # Returns [s*b] — 1D output means the backward gradient is already flat
-+            # and contiguous, so CCE's grad_out.view(-1) always succeeds.
++            # Returns [s*b]. The gradient flowing back through the reshape/transpose
++            # chain below would otherwise be non-contiguous when it reaches CCE's
++            # grad_out.view(-1); _ForceContiguousGrad below restores contiguity.
 +            loss = linear_cross_entropy(
 +                hidden_flat,
 +                weight,
@@ -89,7 +90,9 @@ diff --git a/Megatron-LM-repo/megatron/core/models/common/language_module/langua
 +            )
 +
 +            # [s*b] => [s, b] => [b, s]
-+            return loss.reshape(s, b).transpose(0, 1).contiguous()
++            loss_sb = loss.reshape(s, b)
++            loss_sb = _ForceContiguousGrad.apply(loss_sb)
++            return loss_sb.transpose(0, 1).contiguous()
 +
 +
      def setup_embeddings_and_output_layer(self) -> None:
@@ -101,7 +104,7 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
 diff --git a/Megatron-LM-repo/megatron/training/training.py b/Megatron-LM-repo/megatron/training/training.py
---- a/Megatron-LM-repo/megatron/training/training.py	(revision 54ad5fafc4a0949c13642f77eddfa39cc075159e)
+--- a/Megatron-LM-repo/megatron/training/training.py	(revision 7589f671f32ccd378e2ed910ac71e7b5170ab512)
 +++ b/Megatron-LM-repo/megatron/training/training.py	(date 1779799924472)
 @@ -2414,6 +2414,69 @@
      return False
