@@ -1,4 +1,4 @@
-Subject: [PATCH] CCE-Loss part 2
+Subject: [PATCH] Newer attempt at a fix
 ---
 Index: Megatron-LM-repo/megatron/training/arguments.py
 IDEA additional info:
@@ -6,7 +6,7 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
 diff --git a/Megatron-LM-repo/megatron/training/arguments.py b/Megatron-LM-repo/megatron/training/arguments.py
---- a/Megatron-LM-repo/megatron/training/arguments.py	(revision 7589f671f32ccd378e2ed910ac71e7b5170ab512)
+--- a/Megatron-LM-repo/megatron/training/arguments.py	(revision ce26d5a761708a0c88ee2dbd3f055efe36ff26da)
 +++ b/Megatron-LM-repo/megatron/training/arguments.py	(date 1779799970698)
 @@ -2022,6 +2022,15 @@
                         help='Disables creation and usage of Gloo process groups.')
@@ -30,7 +30,7 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
 diff --git a/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py b/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py
---- a/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py	(revision 7589f671f32ccd378e2ed910ac71e7b5170ab512)
+--- a/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py	(revision ce26d5a761708a0c88ee2dbd3f055efe36ff26da)
 +++ b/Megatron-LM-repo/megatron/core/models/common/language_module/language_module.py	(date 1779970230841)
 @@ -170,6 +170,65 @@
          loss = loss.transpose(0, 1).contiguous()
@@ -104,9 +104,9 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
 diff --git a/Megatron-LM-repo/megatron/training/training.py b/Megatron-LM-repo/megatron/training/training.py
---- a/Megatron-LM-repo/megatron/training/training.py	(revision 7589f671f32ccd378e2ed910ac71e7b5170ab512)
-+++ b/Megatron-LM-repo/megatron/training/training.py	(date 1779799924472)
-@@ -2414,6 +2414,69 @@
+--- a/Megatron-LM-repo/megatron/training/training.py	(revision ce26d5a761708a0c88ee2dbd3f055efe36ff26da)
++++ b/Megatron-LM-repo/megatron/training/training.py	(date 1779973035504)
+@@ -2414,6 +2414,99 @@
      return False
  
  
@@ -116,6 +116,12 @@ diff --git a/Megatron-LM-repo/megatron/training/training.py b/Megatron-LM-repo/m
 +    Without this, the buffers are allocated lazily on the first optimizer step.
 +    Pre-allocating them ensures the CUDA memory footprint is at its steady-state
 +    level from step 1, so CCE can pick a stable tile size immediately.
++
++    Note: we inline the logic instead of calling `leaf_opt.init_state_fn` because
++    upstream `init_state_fn` calls `opt.initialize_state(p)` for precision-aware
++    optimizers (FusedAdam) without the required `store_param_remainders` arg —
++    that path is only normally exercised via checkpoint loading, so the bug
++    never surfaced there.
 +    """
 +    from megatron.core.optimizer.optimizer import ChainedOptimizer
 +
@@ -126,11 +132,35 @@ diff --git a/Megatron-LM-repo/megatron/training/training.py b/Megatron-LM-repo/m
 +    )
 +
 +    for leaf_opt in leaf_optimizers:
-+        init_fn = getattr(leaf_opt, 'init_state_fn', None)
 +        inner = getattr(leaf_opt, 'optimizer', None)
-+        if init_fn is not None and inner is not None:
-+            config = getattr(leaf_opt, 'config', None)
-+            init_fn(inner, config)
++        if inner is None:
++            continue
++        config = getattr(leaf_opt, 'config', None)
++        use_precision_aware = bool(
++            config is not None
++            and getattr(config, 'use_precision_aware_optimizer', False)
++        )
++        store_param_remainders = bool(
++            config is not None
++            and getattr(config, 'store_param_remainders', False)
++        )
++
++        for group in inner.param_groups:
++            for p in group['params']:
++                if len(inner.state[p]) > 0:
++                    continue
++                if use_precision_aware:
++                    init_state = getattr(inner, 'initialize_state', None)
++                    if init_state is None:
++                        continue
++                    try:
++                        init_state(p, store_param_remainders)
++                    except TypeError:
++                        # Older signature without store_param_remainders.
++                        init_state(p)
++                else:
++                    inner.state[p]['exp_avg'] = torch.zeros_like(p.data)
++                    inner.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
 +
 +
 +def _prewarm_cce_allocator(args):
@@ -176,7 +206,7 @@ diff --git a/Megatron-LM-repo/megatron/training/training.py b/Megatron-LM-repo/m
  def train(
      forward_step_func,
      model,
-@@ -2679,6 +2742,13 @@
+@@ -2679,6 +2772,13 @@
              optimizers=[optimizer],
          )
  
