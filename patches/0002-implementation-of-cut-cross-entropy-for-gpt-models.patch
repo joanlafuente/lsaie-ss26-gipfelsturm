@@ -53,6 +53,7 @@
 #      or fail to gather the fully materialized weights.
 #   3. Check TP API: Ensure `self.pg_collection.tp` is still the correct way 
 #      to access the tensor-parallel process group in `LanguageModule`.
+# Applied to: Megatron-LM core_v0.16.1
 #
 #diff --git a/.gitignore b/.gitignore
 index 220e64d..a6d5133 100644
