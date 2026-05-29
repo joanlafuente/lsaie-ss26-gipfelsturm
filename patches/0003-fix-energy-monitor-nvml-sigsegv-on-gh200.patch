@@ -1,3 +1,44 @@
+# Patch: Bypass NVML Energy Monitor SIGSEGV on GH200 hardware
+#
+# Problem:
+#   On NVIDIA GH200 GPUs (e.g., CSCS Clariden), calling 
+#   `nvmlDeviceGetTotalEnergyConsumption` during checkpoint writes raises a 
+#   C-level SIGSEGV (segmentation fault). Because this fault occurs at the 
+#   C-level within the NVML library, Python's standard `try...except` block 
+#   cannot catch it. This causes the entire training job to instantly abort 
+#   before the checkpoint can complete its save operation.
+#
+# What this patch does:
+#   Modifies the `EnergyMonitor._get_energy()` method to completely bypass 
+#   the hardware NVML call. Instead of attempting to read the energy and 
+#   crashing, it safely returns `self._last_energy` (the last successfully 
+#   cached value or 0). This preserves the application's stability during 
+#   checkpointing at the cost of accurate per-step energy tracking.
+#
+# Where in the code:
+#   File: megatron/core/energy_monitor.py
+#   Class: EnergyMonitor
+#   Function: _get_energy()
+#
+# How to fix if this patch breaks on a future Megatron version:
+#   If Megatron-LM refactors the `EnergyMonitor` class or updates its NVML 
+#   bindings, search for `nvmlDeviceGetTotalEnergyConsumption` in the core 
+#   utilities. Bypass the hardware query by returning a dummy integer or 
+#   a cached property to prevent the uncatchable GH200 segfault.
+#
+# Applied to: Megatron-LM core_v0.16.1
+#
+diff --git a/Megatron-LM-repo/megatron/core/energy_monitor.py b/Megatron-LM-repo/megatron/core/energy_monitor.py
+--- a/Megatron-LM-repo/megatron/core/energy_monitor.py
++++ b/Megatron-LM-repo/megatron/core/energy_monitor.py
+@@ -59,7 +59,4 @@ class EnergyMonitor:
+     def _get_energy(self) -> int:
+         """Get current energy consumption from NVML."""
+-        try:
+-            return nvmlDeviceGetTotalEnergyConsumption(self._handle)
+-        except NVMLError:
+-            return self._last_energy  # return *something* if it errors
++        return self._last_energy
 diff --git a/Megatron-LM-repo/megatron/core/energy_monitor.py b/Megatron-LM-repo/megatron/core/energy_monitor.py
 --- a/Megatron-LM-repo/megatron/core/energy_monitor.py
 +++ b/Megatron-LM-repo/megatron/core/energy_monitor.py
