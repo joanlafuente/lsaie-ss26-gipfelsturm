@@ -1,4 +1,60 @@
-diff --git a/.gitignore b/.gitignore
+
+# Patch: Integrate Apple's Cut Cross-Entropy (CCE) for GPT Models
+#
+# Problem:
+#   Standard cross-entropy evaluation requires projecting the decoder's hidden 
+#   states through the output layer to form a fully materialized logits tensor 
+#   of dimension [s, b, V]. For large vocabularies, this tensor dominates peak 
+#   activation memory in the final pipeline stage. By bypassing this projection, 
+#   memory pressure can be reduced, enabling larger micro-batch sizes.
+#
+# What this patch does:
+#   Adds a `--use-cut-cross-entropy` flag that replaces the standard dense 
+#   cross-entropy loss with Apple's `cut_cross_entropy` kernel for GPT models.
+#   Specifically:
+#     1. Adds the CLI flag to `arguments.py` and maps it to a new 
+#        `language_model_loss_type` attribute in `TransformerConfig`.
+#     2. Modifies `GPTModel.forward()` to bypass the standard `output_layer` 
+#        projection if CCE is enabled.
+#     3. Introduces `compute_language_model_loss_CCE()` in `LanguageModule` to
+#        evaluate the CCE kernel directly on the hidden states and output weights.
+#     4. Manually triggers `_forward_pre_hooks` on the output/embedding weight 
+#        module prior to CCE evaluation. This ensures compatibility with the ZeRO-2 
+#        distributed optimizer, which normally gathers lazily sharded weights via 
+#        these hooks during the standard `output_layer` forward pass.
+#     5. Instantiates `VocabParallelOptions` to handle vocabulary dimension 
+#        sharding across tensor-parallel ranks.
+#     6. Ignores the local `my_env` virtual environment in `.gitignore`.
+#
+# Where in the code:
+#   File: .gitignore
+#   File: megatron/training/arguments.py
+#   Functions: _add_training_args(), validate_args()
+#
+#   File: megatron/core/transformer/transformer_config.py
+#   Class: TransformerConfig
+#
+#   File: megatron/core/models/gpt/gpt_model.py
+#   Class: GPTModel
+#   Function: forward()
+#
+#   File: megatron/core/models/common/language_module/language_module.py
+#   Class: LanguageModule
+#   Function: compute_language_model_loss_CCE() (New)
+#
+# How to fix if this patch breaks on a future Megatron version:
+#   1. Check `GPTModel.forward()`: Megatron frequently updates how the output 
+#      layer is called or how sequence parallelism is restored. Ensure the CCE 
+#      conditional branch still successfully intercepts the loss calculation 
+#      before `logits` are materialized.
+#   2. Check ZeRO-2 hooks: If Megatron changes its distributed optimizer backend 
+#      or lazy weight gathering mechanism, the manual `_forward_pre_hooks` loop 
+#      in `compute_language_model_loss_CCE()` might throw an `AttributeError` 
+#      or fail to gather the fully materialized weights.
+#   3. Check TP API: Ensure `self.pg_collection.tp` is still the correct way 
+#      to access the tensor-parallel process group in `LanguageModule`.
+#
+#diff --git a/.gitignore b/.gitignore
 index 220e64d..a6d5133 100644
 --- a/.gitignore
 +++ b/.gitignore
