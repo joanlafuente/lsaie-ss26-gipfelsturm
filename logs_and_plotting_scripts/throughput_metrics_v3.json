@@ -1,0 +1,132 @@
+{
+    "CUT_LOSS": {
+        "CUT_LOSS_MBS_4.csv": {
+            "mean_throughput": 32534.862437314234,
+            "std_throughput": 277.14104763793966
+        },
+        "CUT_LOSS_MBS_8.csv": {
+            "mean_throughput": 33583.98444779642,
+            "std_throughput": 282.54201327892264
+        }
+    },
+    "BASELINE": {
+        "BASELINE_2_NODES.csv": {
+            "mean_throughput": 34222.76145457464,
+            "std_throughput": 303.42276354908256
+        },
+        "BASELINE_4_NODES.csv": {
+            "mean_throughput": 33724.34934814364,
+            "std_throughput": 516.0525930820644
+        },
+        "BASELINE_1_NODE.csv": {
+            "mean_throughput": 34993.3099496922,
+            "std_throughput": 160.83133983732296
+        }
+    },
+    "FP8": {
+        "FP8_DELAYED.csv": {
+            "mean_throughput": 39646.609654884545,
+            "std_throughput": 999.3527624646154
+        },
+        "FP8_BLOCKWISE.csv": {
+            "mean_throughput": 36676.14664268173,
+            "std_throughput": 942.3065129086978
+        }
+    },
+    "KERNEL_FUSION": {
+        "KERNEL_FUSION.csv": {
+            "mean_throughput": 33930.42788604122,
+            "std_throughput": 366.3392133221344
+        }
+    },
+    "Model Size vs Throughpout": {
+        "Cut Cross Entropy": {
+            "CUT_LOSS_1_5b.csv": {
+                "mean_throughput": 33583.98444779642,
+                "std_throughput": 282.54201327892264
+            },
+            "CUT_LOSS_125m.csv": {
+                "mean_throughput": 47434.25470588849,
+                "std_throughput": 5690.853334219468
+            },
+            "CUT_LOSS_8b.csv": {
+                "mean_throughput": 10159.68478680217,
+                "std_throughput": 211.14093376541132
+            },
+            "CUT_LOSS_760m.csv": {
+                "mean_throughput": 34451.76106948514,
+                "std_throughput": 3655.821388622288
+            },
+            "CUT_LOSS_3b.csv": {
+                "mean_throughput": 18581.92080235024,
+                "std_throughput": 195.79856727289823
+            }
+        },
+        "Baseline": {
+            "BASELINE_3b.csv": {
+                "mean_throughput": 20365.273199392464,
+                "std_throughput": 30.549974527166608
+            },
+            "BASELINE_125m.csv": {
+                "mean_throughput": 52914.71660213154,
+                "std_throughput": 5516.8516970476185
+            },
+            "BASELINE_1_5b.csv": {
+                "mean_throughput": 34222.76145457464,
+                "std_throughput": 303.42276354908256
+            },
+            "BASELINE_8b.csv": {
+                "mean_throughput": 10385.370817619512,
+                "std_throughput": 964.3046880997252
+            },
+            "BASELINE_750m.csv": {
+                "mean_throughput": 49630.524676954694,
+                "std_throughput": 3941.223232730927
+            }
+        },
+        "Kernel Fusion": {
+            "KERNEL_FUSION_760m.csv": {
+                "mean_throughput": 50471.72519749146,
+                "std_throughput": 4127.192073716041
+            },
+            "KERNEL_FUSION_125m.csv": {
+                "mean_throughput": 49229.024151555524,
+                "std_throughput": 5231.1446592792845
+            },
+            "KERNEL_FUSION_3b.csv": {
+                "mean_throughput": 20050.682476922026,
+                "std_throughput": 20.024678302623986
+            },
+            "KERNEL_FUSION_8b.csv": {
+                "mean_throughput": 10280.465563751053,
+                "std_throughput": 833.971290756074
+            },
+            "KERNEL_FUSION_1_5b.csv": {
+                "mean_throughput": 33930.42788604122,
+                "std_throughput": 366.3392133221344
+            }
+        },
+        "FP8": {
+            "FP8_8b.csv": {
+                "mean_throughput": 15727.889405343678,
+                "std_throughput": 11.574083696508868
+            },
+            "FP8_3b.csv": {
+                "mean_throughput": 27837.016260449233,
+                "std_throughput": 53.53255428006683
+            },
+            "FP8_760m.csv": {
+                "mean_throughput": 45056.63059790751,
+                "std_throughput": 5248.06665643968
+            },
+            "FP8_125m.csv": {
+                "mean_throughput": 45740.358540713096,
+                "std_throughput": 4786.413180042417
+            },
+            "FP8_1_5b.csv": {
+                "mean_throughput": 39646.609654884545,
+                "std_throughput": 999.3527624646154
+            }
+        }
+    }
+}
